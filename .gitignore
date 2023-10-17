@@ -1,0 +1,12 @@
+/target/**
+*/target/*
+/target/**
+target/
+/target/
+perf.*
+Cargo.lock
+heaptrack.*
+
+# Added by cargo
+
+/target
