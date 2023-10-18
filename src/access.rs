@@ -1,15 +1,23 @@
-use std::{borrow::BorrowMut, cell::RefCell, marker::PhantomData, rc::Rc};
+use std::{
+    borrow::BorrowMut, cell::RefCell, marker::PhantomData, ops::DerefMut, rc::Rc,
+    sync::atomic::AtomicU64,
+};
 
 use derive_more::Constructor;
 use enum_dispatch::enum_dispatch;
 use fxhash::FxHashSet;
 
+use crate::address::ByteAddress;
+
 #[enum_dispatch]
 pub trait AccessLike {
-    /// Updates the access and returns (updated, ready)
-    fn update(&mut self, addr: u64) -> (bool, bool);
-    fn get_addr(&self) -> u64;
+    /// Updates the access
+    fn update(&mut self, addr: ByteAddress) {}
+    fn get_addr(&self) -> ByteAddress;
     fn is_write(&self) -> bool;
+
+    fn bundle_index(&self) -> usize;
+    fn num_chunks(&self) -> u64;
 }
 
 #[enum_dispatch(AccessLike)]
@@ -22,106 +30,164 @@ pub enum Access<T> {
     ComplexWrite(ComplexWrite<T>),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Constructor)]
 pub struct SimpleRead {
-    base: u64,
+    base: ByteAddress,
+    bundle_index: usize,
 }
 
 impl AccessLike for SimpleRead {
-    fn update(&mut self, addr: u64) -> (bool, bool) {
-        let resp = addr == self.base;
-        (resp, resp)
-    }
-    fn get_addr(&self) -> u64 {
+    fn get_addr(&self) -> ByteAddress {
         self.base
     }
 
     fn is_write(&self) -> bool {
         false
     }
+
+    fn bundle_index(&self) -> usize {
+        self.bundle_index
+    }
+
+    fn num_chunks(&self) -> u64 {
+        1
+    }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Constructor)]
 pub struct SimpleWrite<T> {
-    base: u64,
-    payload: T,
+    base: ByteAddress,
+    pub payload: T,
+    bundle_index: usize,
 }
 
 impl<T> AccessLike for SimpleWrite<T> {
-    fn update(&mut self, addr: u64) -> (bool, bool) {
-        let resp = addr == self.base;
-        (resp, resp)
-    }
-
-    fn get_addr(&self) -> u64 {
+    fn get_addr(&self) -> ByteAddress {
         self.base
     }
 
     fn is_write(&self) -> bool {
         true
     }
-}
 
-struct ComplexAccessData {
-    accesses: FxHashSet<u64>,
-    base: u64,
-}
+    fn bundle_index(&self) -> usize {
+        self.bundle_index
+    }
 
-#[derive(Clone)]
-struct ComplexAccessProxy {
-    data: Rc<RefCell<ComplexAccessData>>,
-}
-
-impl ComplexAccessProxy {
-    fn update(&mut self, addr: u64) -> (bool, bool) {
-        RefCell::borrow_mut(&self.data).update(addr)
+    fn num_chunks(&self) -> u64 {
+        1
     }
 }
 
-#[derive(Clone)]
+#[derive(Constructor)]
+pub struct ComplexAccessData {
+    // Base address
+    base: ByteAddress,
+
+    // Size of access in bytes
+    extent: u64,
+
+    // Number of underlying memory chunks
+    num_chunks: u64,
+
+    // How many sub-blocks have been loaded already
+    matched_blocks: u64,
+    bundle_index: usize,
+}
+
+impl ComplexAccessData {
+    fn update(&mut self, addr: ByteAddress) {
+        self.matched_blocks += 1;
+    }
+
+    fn is_ready(&self) -> bool {
+        self.matched_blocks == self.num_chunks
+    }
+}
+
+#[derive(Clone, Constructor)]
+pub struct ComplexAccessProxy {
+    data: Rc<RefCell<ComplexAccessData>>,
+}
+
+impl std::ops::Deref for ComplexAccessProxy {
+    type Target = Rc<RefCell<ComplexAccessData>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl std::ops::DerefMut for ComplexAccessProxy {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+#[derive(Clone, Constructor)]
 pub struct ComplexRead {
     proxy: ComplexAccessProxy,
     offset: u64,
 }
 
-impl ComplexAccessData {
-    fn update(&mut self, addr: u64) -> (bool, bool) {
-        let updated = self.accesses.remove(&addr);
-        (updated, self.accesses.is_empty())
-    }
-}
-
 impl AccessLike for ComplexRead {
-    fn update(&mut self, addr: u64) -> (bool, bool) {
-        self.proxy.update(addr)
+    fn update(&mut self, addr: ByteAddress) {
+        RefCell::borrow_mut(&self.proxy).update(addr)
     }
 
-    fn get_addr(&self) -> u64 {
-        self.offset + self.proxy.data.borrow().base
+    fn get_addr(&self) -> ByteAddress {
+        self.proxy.data.borrow().base + self.offset
     }
 
     fn is_write(&self) -> bool {
         false
     }
+
+    fn bundle_index(&self) -> usize {
+        self.proxy.data.borrow().bundle_index
+    }
+
+    fn num_chunks(&self) -> u64 {
+        self.proxy.data.borrow().num_chunks
+    }
 }
 
-#[derive(Clone)]
+impl ComplexRead {
+    pub fn is_ready(&self) -> bool {
+        RefCell::borrow(&self.proxy).is_ready()
+    }
+}
+
+#[derive(Clone, Constructor)]
 pub struct ComplexWrite<T> {
     proxy: ComplexAccessProxy,
     offset: u64,
-    payload: Rc<T>,
+    pub payload: Rc<T>,
 }
 
 impl<T> AccessLike for ComplexWrite<T> {
-    fn update(&mut self, addr: u64) -> (bool, bool) {
-        self.proxy.update(addr)
+    fn update(&mut self, addr: ByteAddress) {
+        RefCell::borrow_mut(&self.proxy).update(addr)
     }
 
-    fn get_addr(&self) -> u64 {
-        self.offset + self.proxy.data.borrow().base
+    fn get_addr(&self) -> ByteAddress {
+        self.proxy.data.borrow().base + self.offset
     }
 
     fn is_write(&self) -> bool {
         true
+    }
+    fn bundle_index(&self) -> usize {
+        self.proxy.data.borrow().bundle_index
+    }
+
+    fn num_chunks(&self) -> u64 {
+        self.proxy.data.borrow().num_chunks
+    }
+}
+
+impl<T> ComplexWrite<T> {
+    pub fn is_ready(&self) -> bool {
+        RefCell::borrow(&self.proxy).is_ready()
     }
 }
