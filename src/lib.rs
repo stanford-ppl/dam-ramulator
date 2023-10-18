@@ -72,7 +72,7 @@ impl<T: DAMType> Context for RamulatorContext<T> {
 
         let mut request_manager = RequestManager::<T>::default();
 
-        loop {
+        while self.continue_running(&backlog, &request_manager) {
             // Process the existing active requests
             // Try to process existing returns, at most one at a time.
             while self.ramulator.ret_available() {
@@ -204,10 +204,6 @@ impl<T: DAMType> RamulatorContext<T> {
         }
     }
 
-    fn advance_until_request_is_active(&self) {
-        todo!();
-    }
-
     fn num_chunks(&self, obj_size_in_bytes: u64) -> u64 {
         assert_ne!(obj_size_in_bytes, 0);
         (self.bytes_per_access + obj_size_in_bytes - 1) / self.bytes_per_access
@@ -251,7 +247,6 @@ impl<T: DAMType> RamulatorContext<T> {
                             {
                                 let mut offset_in_bytes = 0;
                                 while offset_in_bytes < data_size_in_bytes {
-                                    let addr = base_address + offset_in_bytes;
                                     let access = ComplexWrite::new(
                                         proxy.clone(),
                                         offset_in_bytes,
@@ -355,27 +350,60 @@ impl<T: DAMType> RamulatorContext<T> {
         }
     }
 
-    fn drop_dead_accesses(&mut self) {
-        self.writers
-            .retain(|writer| match (writer.addr.peek(), writer.data.peek()) {
-                (PeekResult::Closed, PeekResult::Closed) => false,
-                _ => true,
-            });
-        self.readers.retain(|reader| {
-            if let PeekResult::Closed = reader.addr.peek() {
-                false
-            } else {
-                true
-            }
-        });
-    }
-
     fn read_chunk(&self, addr: ChunkAddress) -> &Chunk<T> {
         &self.datastore[addr.0 as usize]
     }
 
     fn write_chunk(&mut self, addr: ChunkAddress, data: Chunk<T>) {
         self.datastore[addr.0 as usize] = data;
+    }
+
+    fn continue_running(
+        &mut self,
+        backlog: &Vec<Access<T>>,
+        request_manager: &RequestManager<T>,
+    ) -> bool {
+        if !backlog.is_empty() {
+            return true;
+        }
+
+        if !request_manager.is_empty() {
+            return true;
+        }
+
+        // check all of the writers
+        let writers_done = self
+            .writers
+            .iter()
+            .all(
+                |WriteBundle { data, addr, ack: _ }| match (data.peek(), addr.peek()) {
+                    (PeekResult::Closed, _) | (_, PeekResult::Closed) => true,
+                    _ => false,
+                },
+            );
+
+        if !writers_done {
+            return true;
+        }
+
+        let readers_done = self.readers.iter().all(
+            |ReadBundle {
+                 addr,
+                 size,
+                 resp: _,
+             }| {
+                match (addr.peek(), size.peek()) {
+                    (PeekResult::Closed, _) | (_, PeekResult::Closed) => true,
+                    _ => false,
+                }
+            },
+        );
+
+        if !readers_done {
+            return true;
+        }
+
+        false
     }
 }
 

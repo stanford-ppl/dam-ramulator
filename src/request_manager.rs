@@ -31,4 +31,10 @@ impl<T> RequestManager<T> {
             }
         }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.addr_to_access_map
+            .values()
+            .all(|queue| queue.is_empty())
+    }
 }
