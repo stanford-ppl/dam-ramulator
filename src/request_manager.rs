@@ -1,17 +1,17 @@
 use std::collections::VecDeque;
 
 use crate::{
-    access::{Access, AccessLike},
+    access::{Access, AccessLike, Read},
     address::ByteAddress,
 };
 
 #[derive(Default, Debug)]
-pub struct RequestManager<T> {
-    addr_to_access_map: fxhash::FxHashMap<ByteAddress, VecDeque<Access<T>>>,
+pub struct RequestManager {
+    addr_to_access_map: fxhash::FxHashMap<ByteAddress, VecDeque<Read>>,
 }
 
-impl<T> RequestManager<T> {
-    pub fn add_request(&mut self, access: Access<T>) {
+impl RequestManager {
+    pub fn add_request(&mut self, access: Read) {
         self.addr_to_access_map
             .entry(access.get_addr())
             .or_default()
@@ -19,11 +19,11 @@ impl<T> RequestManager<T> {
     }
 
     /// Possibly returns an access if it is ready.
-    pub fn register_recv(&mut self, addr: ByteAddress) -> Access<T> {
+    pub fn register_recv(&mut self, addr: ByteAddress) -> Read {
         match self.addr_to_access_map.get_mut(&addr) {
             Some(queue) if !queue.is_empty() => {
                 let mut acc = queue.pop_front().unwrap();
-                acc.update(addr);
+                acc.mark_resolved();
                 acc
             }
             _ => {

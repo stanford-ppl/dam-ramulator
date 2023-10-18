@@ -18,6 +18,8 @@ pub use ramulator_wrapper;
 use request_manager::RequestManager;
 use utils::VecUtils;
 
+use crate::access::Read;
+
 mod access;
 mod address;
 mod chunks;
@@ -71,18 +73,17 @@ impl<T: DAMType> Context for RamulatorContext<'_, T> {
         // by pulling this out, Access doesn't need to be Send/Sync.
         let mut backlog: Vec<Access<T>> = vec![];
 
-        let mut request_manager = RequestManager::<T>::default();
+        // This handles reads; writes are automatically handled if ready.
+        let mut request_manager = RequestManager::default();
 
         while self.continue_running(&backlog, &request_manager) {
-            println!("Starting Loop");
             // Process the existing active requests
             // Try to process existing returns, at most one at a time.
             while self.ramulator.ret_available() {
-                println!("Popping from Ramulator");
                 let resp_loc = address::ByteAddress(self.ramulator.pop());
                 let chunk_addr = resp_loc.to_chunk(self.bytes_per_access);
                 match request_manager.register_recv(resp_loc) {
-                    Access::SimpleRead(read) => {
+                    Read::SimpleRead(read) => {
                         let data = self.read_chunk(chunk_addr).unwrap().clone();
                         self.readers[read.bundle_index()]
                             .resp
@@ -96,23 +97,8 @@ impl<T: DAMType> Context for RamulatorContext<'_, T> {
                             .unwrap();
                         break;
                     }
-                    Access::SimpleWrite(write) => {
-                        let index = write.bundle_index();
-                        let data = write.payload;
-                        self.write_chunk(chunk_addr, Chunk::First(data));
-                        self.writers[index]
-                            .ack
-                            .enqueue(
-                                &self.time,
-                                ChannelElement {
-                                    time: self.time.tick() + 1,
-                                    data: true,
-                                },
-                            )
-                            .unwrap();
-                        break;
-                    }
-                    Access::ComplexRead(read) if read.is_ready() => {
+
+                    Read::ComplexRead(read) if read.almost_ready() => {
                         let data = self.read_chunk(chunk_addr).unwrap().clone();
                         // Sweep forward, checking to see if they're marked as blank
                         for i in 1..read.num_chunks() {
@@ -132,42 +118,15 @@ impl<T: DAMType> Context for RamulatorContext<'_, T> {
                         break;
                     }
 
-                    Access::ComplexRead(_) => {
-                        // Not ready yet
-                    }
-
-                    Access::ComplexWrite(write) if write.is_ready() => {
-                        let index = write.bundle_index();
-                        let num_chunks = write.num_chunks();
-                        let data = write.payload;
-                        self.write_chunk(chunk_addr, Chunk::First(Rc::into_inner(data).expect("Should not have resolved a multi-chunk write before all chunks are resolved.")));
-                        // Sweep forward, checking to see if they're marked as blank
-                        for i in 1..num_chunks {
-                            self.write_chunk(chunk_addr + i, Chunk::Blank);
-                        }
-                        self.writers[index]
-                            .ack
-                            .enqueue(
-                                &self.time,
-                                ChannelElement {
-                                    time: self.time.tick() + 1,
-                                    data: true,
-                                },
-                            )
-                            .unwrap();
-                    }
-
-                    Access::ComplexWrite(_) => {
+                    Read::ComplexRead(_) => {
                         // Not ready yet
                     }
                 }
             }
 
-            println!("Updating Ticks");
             // In case we had to stall on the enqueue side.
             self.update_ticks();
 
-            println!("Processing Backlog: {:?}", backlog.len());
             // Try to move elements from backlog to active.
             // The backlog isn't really a 'real' concept, but rather to support "large" objects which:
             //   1. span more than a single access chunk
@@ -184,12 +143,7 @@ impl<T: DAMType> Context for RamulatorContext<'_, T> {
             );
 
             to_process.into_iter().for_each(|access| {
-                Self::enqueue_or_backlog(
-                    &mut self.ramulator,
-                    access,
-                    &mut request_manager,
-                    &mut backlog,
-                );
+                self.enqueue_or_backlog(access, &mut request_manager, &mut backlog);
             });
 
             // Since the backlog is empty, we try to process more requests.
@@ -201,8 +155,6 @@ impl<T: DAMType> Context for RamulatorContext<'_, T> {
             if backlog.is_empty() {
                 self.update_read_requests(&mut request_manager, &mut backlog);
             }
-
-            println!("Advancing Time: {:?}", self.time.tick());
 
             self.time.incr_cycles(1);
             self.update_ticks();
@@ -251,8 +203,6 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
     fn update_ticks(&mut self) {
         let cur_ticks = self.time.tick().time();
         let expected_cycles = (cur_ticks * &self.cycles_per_tick.0) / &self.cycles_per_tick.1;
-        println!("Expected Cycles: {:?}", expected_cycles);
-        println!("Current Cycles: {:?}", self.elapsed_cycles);
         while self.elapsed_cycles < expected_cycles {
             self.elapsed_cycles += 1u32;
             self.ramulator.cycle();
@@ -266,10 +216,11 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
 
     fn update_write_requests(
         &mut self,
-        request_manager: &mut RequestManager<T>,
+        request_manager: &mut RequestManager,
         backlog: &mut Vec<Access<T>>,
     ) {
         let cur_time = self.time.tick();
+        let mut accesses = vec![];
         for (ind, writer) in self.writers.iter().enumerate() {
             match (writer.addr.peek(), writer.data.peek()) {
                 (
@@ -310,38 +261,34 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
                                         value.clone(),
                                     )
                                     .into();
-                                    Self::enqueue_or_backlog(
-                                        &mut self.ramulator,
-                                        access,
-                                        request_manager,
-                                        backlog,
-                                    );
+                                    // self.enqueue_or_backlog(access, request_manager, backlog);
+                                    accesses.push(access);
 
                                     offset_in_bytes += self.bytes_per_access;
                                 }
                             }
                         } else {
                             let access = SimpleWrite::new(base_address, data, ind).into();
-                            Self::enqueue_or_backlog(
-                                &mut self.ramulator,
-                                access,
-                                request_manager,
-                                backlog,
-                            );
+                            // self.enqueue_or_backlog(access, request_manager, backlog);
+                            accesses.push(access);
                         }
                     }
                 }
                 _ => {}
             }
         }
+        for access in accesses {
+            self.enqueue_or_backlog(access, request_manager, backlog)
+        }
     }
 
     fn update_read_requests(
         &mut self,
-        request_manager: &mut RequestManager<T>,
+        request_manager: &mut RequestManager,
         backlog: &mut Vec<Access<T>>,
     ) {
         let cur_time = self.time.tick();
+        let mut accesses: Vec<Access<T>> = vec![];
         for (ind, reader) in self.readers.iter().enumerate() {
             match (reader.addr.peek(), reader.size.peek()) {
                 (
@@ -372,34 +319,29 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
                             while offset_in_bytes < read_size_in_bytes {
                                 let access =
                                     ComplexRead::new(proxy.clone(), offset_in_bytes).into();
-                                Self::enqueue_or_backlog(
-                                    &mut self.ramulator,
-                                    access,
-                                    request_manager,
-                                    backlog,
-                                );
+                                // self.enqueue_or_backlog(access, request_manager, backlog);\
+                                accesses.push(access);
                                 offset_in_bytes += self.bytes_per_access;
                             }
                         }
                     } else {
                         let access = SimpleRead::new(base_address, ind).into();
-                        Self::enqueue_or_backlog(
-                            &mut self.ramulator,
-                            access,
-                            request_manager,
-                            backlog,
-                        );
+                        accesses.push(access);
+                        // self.enqueue_or_backlog(access, request_manager, backlog);
                     }
                 }
                 _ => {}
             }
         }
+        for access in accesses {
+            self.enqueue_or_backlog(access, request_manager, backlog)
+        }
     }
 
     fn enqueue_or_backlog(
-        ramulator: &mut ramulator_wrapper::RamulatorWrapper,
+        &mut self,
         access: Access<T>,
-        manager: &mut RequestManager<T>,
+        manager: &mut RequestManager,
         backlog: &mut Vec<Access<T>>,
     ) {
         println!(
@@ -407,12 +349,59 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
             access.get_addr().0,
             access.is_write()
         );
-        if ramulator.available(access.get_addr().into(), access.is_write()) {
-            ramulator.send(access.get_addr().into(), access.is_write());
-            manager.add_request(access);
-            println!("Send Success");
+        if self
+            .ramulator
+            .available(access.get_addr().into(), access.is_write())
+        {
+            self.ramulator
+                .send(access.get_addr().into(), access.is_write());
+            match access {
+                Access::SimpleRead(rd) => manager.add_request(rd.into()),
+                Access::ComplexRead(rd) => manager.add_request(rd.into()),
+                Access::SimpleWrite(write) => {
+                    let chunk_addr = write.get_addr().to_chunk(self.bytes_per_access);
+                    let index = write.bundle_index();
+                    let data = write.payload;
+                    self.write_chunk(chunk_addr, Chunk::First(data));
+                    self.writers[index]
+                        .ack
+                        .enqueue(
+                            &self.time,
+                            ChannelElement {
+                                time: self.time.tick() + 1,
+                                data: true,
+                            },
+                        )
+                        .unwrap();
+                }
+                Access::ComplexWrite(write) if write.almost_ready() => {
+                    let chunk_addr = write.get_addr().to_chunk(self.bytes_per_access);
+                    let index = write.bundle_index();
+                    let num_chunks = write.num_chunks();
+                    let data = write.payload;
+
+                    self.write_chunk(chunk_addr, Chunk::First(Rc::into_inner(data).expect("Should not have resolved a multi-chunk write before all chunks are resolved.")));
+                    // Sweep forward, checking to see if they're marked as blank
+                    for i in 1..num_chunks {
+                        self.write_chunk(chunk_addr + i, Chunk::Blank);
+                    }
+                    self.writers[index]
+                        .ack
+                        .enqueue(
+                            &self.time,
+                            ChannelElement {
+                                time: self.time.tick() + 1,
+                                data: true,
+                            },
+                        )
+                        .unwrap();
+                }
+
+                Access::ComplexWrite(mut wr) => {
+                    wr.mark_resolved();
+                }
+            }
         } else {
-            println!("Send Failed, pushed to backlog");
             backlog.push(access);
         }
     }
@@ -428,15 +417,13 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
     fn continue_running(
         &mut self,
         backlog: &Vec<Access<T>>,
-        request_manager: &RequestManager<T>,
+        request_manager: &RequestManager,
     ) -> bool {
         if !backlog.is_empty() {
-            println!("Backlog Nonempty");
             return true;
         }
 
         if !request_manager.is_empty() {
-            println!("Request Manager Nonempty: {:?}", request_manager);
             return true;
         }
 
@@ -452,7 +439,6 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
             );
 
         if !writers_done {
-            println!("Writers Nonempty");
             return true;
         }
 
@@ -489,7 +475,7 @@ mod test {
     use crate::RamulatorContext;
     #[test]
     fn ramulator_e2e_small() {
-        const MEM_SIZE: usize = 1;
+        const MEM_SIZE: usize = 2;
 
         let mut parent = ProgramBuilder::default();
         let ramulator =
@@ -502,9 +488,9 @@ mod test {
         let (addr_snd, addr_rcv) = parent.unbounded();
         let (data_snd, data_rcv) = parent.unbounded();
         let (ack_snd, ack_rcv) = parent.unbounded::<bool>();
-        let addrs = || (0..(MEM_SIZE as u64)).map(|x| (x + 1) * 64);
+        let addrs = || (0..(MEM_SIZE as u64)).map(|x| x * 64);
         parent.add_child(GeneratorContext::new(addrs, addr_snd));
-        parent.add_child(GeneratorContext::new(|| 0..(MEM_SIZE as u64), data_snd));
+        parent.add_child(GeneratorContext::new(|| 1..(1 + MEM_SIZE as u64), data_snd));
 
         mem_context.add_writer(crate::WriteBundle {
             data: Box::new(data_rcv),
@@ -513,7 +499,7 @@ mod test {
         });
 
         let (raddr_snd, raddr_rcv) = parent.unbounded();
-        let (rdata_snd, rdata_rcv) = parent.unbounded();
+        let (rdata_snd, rdata_rcv) = parent.unbounded::<u64>();
         let (size_snd, size_rcv) = parent.unbounded();
 
         let mut read_ctx = FunctionContext::new();
@@ -530,7 +516,7 @@ mod test {
                         time,
                         ChannelElement {
                             time: time.tick() + 1,
-                            data: 64 * (1 + iter as u64),
+                            data: 64 * (iter as u64),
                         },
                     )
                     .unwrap();
@@ -555,7 +541,8 @@ mod test {
         });
 
         parent.add_child(mem_context);
-        parent.add_child(CheckerContext::new(|| 0..(MEM_SIZE as u64), rdata_rcv));
+        // parent.add_child(CheckerContext::new(|| 1..(1 + MEM_SIZE as u64), rdata_rcv));
+        parent.add_child(PrinterContext::new(rdata_rcv));
 
         println!("Finished building");
 

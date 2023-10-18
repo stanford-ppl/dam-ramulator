@@ -7,8 +7,7 @@ use crate::address::ByteAddress;
 
 #[enum_dispatch]
 pub trait AccessLike {
-    /// Updates the access
-    fn update(&mut self, _addr: ByteAddress) {}
+    fn mark_resolved(&mut self) {}
     fn get_addr(&self) -> ByteAddress;
     fn is_write(&self) -> bool;
 
@@ -24,6 +23,13 @@ pub enum Access<T> {
 
     ComplexRead(ComplexRead),
     ComplexWrite(ComplexWrite<T>),
+}
+
+#[enum_dispatch(AccessLike)]
+#[derive(Clone, Debug)]
+pub enum Read {
+    SimpleRead,
+    ComplexRead,
 }
 
 #[derive(Clone, Copy, Constructor, Debug)]
@@ -89,12 +95,12 @@ pub struct ComplexAccessData {
 }
 
 impl ComplexAccessData {
-    fn update(&mut self, _addr: ByteAddress) {
+    fn mark_resolved(&mut self) {
         self.matched_blocks += 1;
     }
 
-    fn is_ready(&self) -> bool {
-        self.matched_blocks == self.num_chunks
+    fn almost_ready(&self) -> bool {
+        (self.matched_blocks + 1) >= self.num_chunks
     }
 }
 
@@ -124,8 +130,8 @@ pub struct ComplexRead {
 }
 
 impl AccessLike for ComplexRead {
-    fn update(&mut self, addr: ByteAddress) {
-        RefCell::borrow_mut(&self.proxy).update(addr)
+    fn mark_resolved(&mut self) {
+        RefCell::borrow_mut(&self.proxy).mark_resolved()
     }
 
     fn get_addr(&self) -> ByteAddress {
@@ -146,8 +152,8 @@ impl AccessLike for ComplexRead {
 }
 
 impl ComplexRead {
-    pub fn is_ready(&self) -> bool {
-        RefCell::borrow(&self.proxy).is_ready()
+    pub fn almost_ready(&self) -> bool {
+        RefCell::borrow(&self.proxy).almost_ready()
     }
 }
 
@@ -159,8 +165,8 @@ pub struct ComplexWrite<T> {
 }
 
 impl<T> AccessLike for ComplexWrite<T> {
-    fn update(&mut self, addr: ByteAddress) {
-        RefCell::borrow_mut(&self.proxy).update(addr)
+    fn mark_resolved(&mut self) {
+        RefCell::borrow_mut(&self.proxy).mark_resolved()
     }
 
     fn get_addr(&self) -> ByteAddress {
@@ -180,7 +186,7 @@ impl<T> AccessLike for ComplexWrite<T> {
 }
 
 impl<T> ComplexWrite<T> {
-    pub fn is_ready(&self) -> bool {
-        RefCell::borrow(&self.proxy).is_ready()
+    pub fn almost_ready(&self) -> bool {
+        RefCell::borrow(&self.proxy).almost_ready()
     }
 }
