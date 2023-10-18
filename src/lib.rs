@@ -594,10 +594,12 @@ mod test {
 
         println!("Finished building");
 
-        parent
+        let executed = parent
             .initialize(InitializationOptions::default())
             .unwrap()
             .run(RunOptions::default());
+
+        println!("Elapsed: {:?}", executed.elapsed_cycles());
     }
 
     #[test]
