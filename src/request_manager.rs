@@ -5,7 +5,7 @@ use crate::{
     address::ByteAddress,
 };
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct RequestManager<T> {
     addr_to_access_map: fxhash::FxHashMap<ByteAddress, VecDeque<Access<T>>>,
 }

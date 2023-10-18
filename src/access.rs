@@ -1,18 +1,14 @@
-use std::{
-    borrow::BorrowMut, cell::RefCell, marker::PhantomData, ops::DerefMut, rc::Rc,
-    sync::atomic::AtomicU64,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use derive_more::Constructor;
 use enum_dispatch::enum_dispatch;
-use fxhash::FxHashSet;
 
 use crate::address::ByteAddress;
 
 #[enum_dispatch]
 pub trait AccessLike {
     /// Updates the access
-    fn update(&mut self, addr: ByteAddress) {}
+    fn update(&mut self, _addr: ByteAddress) {}
     fn get_addr(&self) -> ByteAddress;
     fn is_write(&self) -> bool;
 
@@ -21,7 +17,7 @@ pub trait AccessLike {
 }
 
 #[enum_dispatch(AccessLike)]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Access<T> {
     SimpleRead(SimpleRead),
     SimpleWrite(SimpleWrite<T>),
@@ -30,7 +26,7 @@ pub enum Access<T> {
     ComplexWrite(ComplexWrite<T>),
 }
 
-#[derive(Clone, Copy, Constructor)]
+#[derive(Clone, Copy, Constructor, Debug)]
 pub struct SimpleRead {
     base: ByteAddress,
     bundle_index: usize,
@@ -54,7 +50,7 @@ impl AccessLike for SimpleRead {
     }
 }
 
-#[derive(Clone, Constructor)]
+#[derive(Clone, Constructor, Debug)]
 pub struct SimpleWrite<T> {
     base: ByteAddress,
     pub payload: T,
@@ -79,13 +75,10 @@ impl<T> AccessLike for SimpleWrite<T> {
     }
 }
 
-#[derive(Constructor)]
+#[derive(Constructor, Debug)]
 pub struct ComplexAccessData {
     // Base address
     base: ByteAddress,
-
-    // Size of access in bytes
-    extent: u64,
 
     // Number of underlying memory chunks
     num_chunks: u64,
@@ -96,7 +89,7 @@ pub struct ComplexAccessData {
 }
 
 impl ComplexAccessData {
-    fn update(&mut self, addr: ByteAddress) {
+    fn update(&mut self, _addr: ByteAddress) {
         self.matched_blocks += 1;
     }
 
@@ -105,7 +98,7 @@ impl ComplexAccessData {
     }
 }
 
-#[derive(Clone, Constructor)]
+#[derive(Clone, Constructor, Debug)]
 pub struct ComplexAccessProxy {
     data: Rc<RefCell<ComplexAccessData>>,
 }
@@ -124,7 +117,7 @@ impl std::ops::DerefMut for ComplexAccessProxy {
     }
 }
 
-#[derive(Clone, Constructor)]
+#[derive(Clone, Constructor, Debug)]
 pub struct ComplexRead {
     proxy: ComplexAccessProxy,
     offset: u64,
@@ -158,7 +151,7 @@ impl ComplexRead {
     }
 }
 
-#[derive(Clone, Constructor)]
+#[derive(Clone, Constructor, Debug)]
 pub struct ComplexWrite<T> {
     proxy: ComplexAccessProxy,
     offset: u64,
