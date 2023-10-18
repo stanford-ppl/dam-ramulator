@@ -344,11 +344,6 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
         manager: &mut RequestManager,
         backlog: &mut Vec<Access<T>>,
     ) {
-        println!(
-            "Attempting to push: {:?}, {:?}",
-            access.get_addr().0,
-            access.is_write()
-        );
         if self
             .ramulator
             .available(access.get_addr().into(), access.is_write())
@@ -475,7 +470,7 @@ mod test {
     use crate::RamulatorContext;
     #[test]
     fn ramulator_e2e_small() {
-        const MEM_SIZE: usize = 2;
+        const MEM_SIZE: usize = 32;
 
         let mut parent = ProgramBuilder::default();
         let ramulator =
