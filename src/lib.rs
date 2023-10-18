@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::VecDeque;
+
 use std::rc::Rc;
 
 use access::{
@@ -8,9 +8,9 @@ use access::{
 };
 use address::ChunkAddress;
 use chunks::Chunk;
-use dam::channel::{DequeueError, PeekResult};
-use dam::types::IndexLike;
-use dam::{context_tools::*, types::StaticallySized};
+use dam::channel::PeekResult;
+
+use dam::context_tools::*;
 use derive_more::Constructor;
 
 use num_bigint::BigUint;
@@ -66,6 +66,7 @@ pub struct ReadBundle<'a, T> {
     addr: Box<Recv<'a, u64>>,
     size: Box<Recv<'a, u64>>,
     resp: Box<Snd<'a, T>>,
+    resp_addr: Box<Snd<'a, u64>>,
 }
 
 impl<T: DAMType> Context for RamulatorContext<'_, T> {
@@ -95,6 +96,16 @@ impl<T: DAMType> Context for RamulatorContext<'_, T> {
                                 },
                             )
                             .unwrap();
+                        self.readers[read.bundle_index()]
+                            .resp_addr
+                            .enqueue(
+                                &self.time,
+                                ChannelElement {
+                                    time: self.time.tick() + 1,
+                                    data: resp_loc.0,
+                                },
+                            )
+                            .unwrap();
                         break;
                     }
 
@@ -112,6 +123,17 @@ impl<T: DAMType> Context for RamulatorContext<'_, T> {
                                 ChannelElement {
                                     time: self.time.tick() + 1,
                                     data,
+                                },
+                            )
+                            .unwrap();
+
+                        self.readers[read.bundle_index()]
+                            .resp_addr
+                            .enqueue(
+                                &self.time,
+                                ChannelElement {
+                                    time: self.time.tick() + 1,
+                                    data: read.base_addr().0,
                                 },
                             )
                             .unwrap();
@@ -185,11 +207,25 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
         }
     }
 
-    pub fn add_reader(&mut self, ReadBundle { addr, size, resp }: ReadBundle<'a, T>) {
+    pub fn add_reader(
+        &mut self,
+        ReadBundle {
+            addr,
+            size,
+            resp,
+            resp_addr,
+        }: ReadBundle<'a, T>,
+    ) {
         addr.attach_receiver(self);
         size.attach_receiver(self);
         resp.attach_sender(self);
-        self.readers.push(ReadBundle { addr, size, resp });
+        resp_addr.attach_sender(self);
+        self.readers.push(ReadBundle {
+            addr,
+            size,
+            resp,
+            resp_addr,
+        });
     }
 
     pub fn add_writer(&mut self, WriteBundle { data, addr, ack }: WriteBundle<'a, T>) {
@@ -442,6 +478,7 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
                  addr,
                  size,
                  resp: _,
+                 resp_addr: _,
              }| {
                 match (addr.peek(), size.peek()) {
                     (PeekResult::Closed, _) | (_, PeekResult::Closed) => true,
@@ -461,6 +498,7 @@ impl<'a, T: DAMType> RamulatorContext<'a, T> {
 
 #[cfg(test)]
 mod test {
+
     use dam::context_tools::*;
     use dam::simulation::{InitializationOptions, ProgramBuilder, RunOptions};
     use dam::utility_contexts::*;
@@ -529,15 +567,30 @@ mod test {
         });
         parent.add_child(read_ctx);
 
+        let (resp_addr_snd, resp_addr_rcv) = parent.unbounded::<u64>();
         mem_context.add_reader(crate::ReadBundle {
             addr: Box::new(raddr_rcv),
             size: Box::new(size_rcv),
             resp: Box::new(rdata_snd),
+            resp_addr: Box::new(resp_addr_snd),
         });
 
         parent.add_child(mem_context);
-        // parent.add_child(CheckerContext::new(|| 1..(1 + MEM_SIZE as u64), rdata_rcv));
-        parent.add_child(PrinterContext::new(rdata_rcv));
+        let mut verif_context = FunctionContext::new();
+        resp_addr_rcv.attach_receiver(&verif_context);
+        rdata_rcv.attach_receiver(&verif_context);
+        verif_context.set_run(move |time| {
+            let mut received: fxhash::FxHashMap<u64, u64> = Default::default();
+            for _ in 0..MEM_SIZE {
+                let addr = resp_addr_rcv.dequeue(time).unwrap().data;
+                let data = rdata_rcv.dequeue(time).unwrap().data;
+                received.insert(addr, data);
+                time.incr_cycles(1);
+            }
+            println!("Received: {:?}", received);
+        });
+
+        parent.add_child(verif_context);
 
         println!("Finished building");
 

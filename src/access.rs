@@ -155,6 +155,10 @@ impl ComplexRead {
     pub fn almost_ready(&self) -> bool {
         RefCell::borrow(&self.proxy).almost_ready()
     }
+
+    pub fn base_addr(&self) -> ByteAddress {
+        self.proxy.data.borrow().base
+    }
 }
 
 #[derive(Clone, Constructor, Debug)]

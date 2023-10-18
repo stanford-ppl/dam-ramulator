@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::{
-    access::{Access, AccessLike, Read},
+    access::{AccessLike, Read},
     address::ByteAddress,
 };
 
