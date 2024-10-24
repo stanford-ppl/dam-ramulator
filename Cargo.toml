@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 ramulator_wrapper = "0.2.6"
 tempfile = "3.8.0"
-dam = {version = "0.1.0", git = "https://github.com/stanford-ppl/DAM-RS.git", default-features = false, branch="dev"}
+dam = {git = "https://github.com/stanford-ppl/DAM-RS.git", default-features = true, features=["coroutines"], branch="dev"}
 fxhash = "0.2.1"
 derive_more = "0.99.17"
 num-bigint = "0.4.4"
